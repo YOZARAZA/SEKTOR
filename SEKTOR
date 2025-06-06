@@ -6,7 +6,6 @@ import sys
 import numpy as np
 import warnings
 from functools import lru_cache
-from joblib import Parallel, delayed
 import random
 import logging
 import os
@@ -40,16 +39,7 @@ SECTOR_ANGLE        = 360 / NUMBER_OF_SECTORS
 # Нормировочный коэффициент для итоговой дистанции
 NORMALIZATION_COEFFICIENT = 0.8
 
-model_call_count = 0
-
-# --------------------------
-# Новый список моделей:
-#  - Экспоненциальное трение
-#  - INITIAL_SPEED_MIN/MAX
-#  - Остальные поля для совместимости
-# --------------------------
 physics_params_list = [
-    # Physics1 (~3.7 оборотов)
     {
         "INITIAL_SPEED_MIN": 1.33,
         "INITIAL_SPEED_MAX": 1.34,
@@ -61,7 +51,6 @@ physics_params_list = [
         "TOTAL_DURATION_MIN": 26,
         "TOTAL_DURATION_MAX": 28
     },
-    # Physics2 (~3.8 оборотов)
     {
         "INITIAL_SPEED_MIN": 1.30,
         "INITIAL_SPEED_MAX": 1.31,
@@ -73,7 +62,6 @@ physics_params_list = [
         "TOTAL_DURATION_MIN": 27,
         "TOTAL_DURATION_MAX": 29
     },
-    # Physics3 (~3.9 оборотов)
     {
         "INITIAL_SPEED_MIN": 1.27,
         "INITIAL_SPEED_MAX": 1.28,
@@ -85,7 +73,6 @@ physics_params_list = [
         "TOTAL_DURATION_MIN": 26,
         "TOTAL_DURATION_MAX": 30
     },
-    # Physics4 (~4.0 оборотов)
     {
         "INITIAL_SPEED_MIN": 1.24,
         "INITIAL_SPEED_MAX": 1.25,
@@ -97,7 +84,6 @@ physics_params_list = [
         "TOTAL_DURATION_MIN": 29,
         "TOTAL_DURATION_MAX": 31
     },
-    # Physics5 (~4.1 оборотов)
     {
         "INITIAL_SPEED_MIN": 1.21,
         "INITIAL_SPEED_MAX": 1.22,
@@ -109,7 +95,6 @@ physics_params_list = [
         "TOTAL_DURATION_MIN": 30,
         "TOTAL_DURATION_MAX": 32
     },
-    # Physics6 (~4.2 оборотов)
     {
         "INITIAL_SPEED_MIN": 1.16,
         "INITIAL_SPEED_MAX": 1.17,
@@ -121,7 +106,6 @@ physics_params_list = [
         "TOTAL_DURATION_MIN": 32,
         "TOTAL_DURATION_MAX": 34
     },
-    # Physics7 (~3.7 оборотов)
     {
         "INITIAL_SPEED_MIN": 1.10,
         "INITIAL_SPEED_MAX": 1.11,
@@ -133,7 +117,6 @@ physics_params_list = [
         "TOTAL_DURATION_MIN": 33,
         "TOTAL_DURATION_MAX": 35
     },
-    # Physics8 (~4.5 оборотов)
     {
         "INITIAL_SPEED_MIN": 1.05,
         "INITIAL_SPEED_MAX": 1.06,
@@ -145,7 +128,6 @@ physics_params_list = [
         "TOTAL_DURATION_MIN": 34,
         "TOTAL_DURATION_MAX": 36
     },
-    # Physics9 (~4.7 оборотов)
     {
         "INITIAL_SPEED_MIN": 1.00,
         "INITIAL_SPEED_MAX": 1.01,
@@ -157,7 +139,6 @@ physics_params_list = [
         "TOTAL_DURATION_MIN": 36,
         "TOTAL_DURATION_MAX": 38
     },
-    # Physics10 (~4.9 оборотов)
     {
         "INITIAL_SPEED_MIN": 0.95,
         "INITIAL_SPEED_MAX": 0.96,
@@ -174,7 +155,6 @@ physics_params_list = [
 model_errors = {f"Physics{i}": [] for i in range(1, 11)}
 model_errors_distance = {f"Physics{i}": [] for i in range(1, 11)}
 
-# Adam состояния для каждого параметра каждой модели
 adam_states = [
     {
         "m": {"AVERAGE_SPEED": 0.0, "SPEED_STD": 0.0},
@@ -184,7 +164,6 @@ adam_states = [
     for _ in physics_params_list
 ]
 
-# Гиперпараметры Adam
 ADAM_LR = 0.01
 ADAM_BETA1 = 0.9
 ADAM_BETA2 = 0.999
@@ -217,15 +196,13 @@ def clear_console():
     else:
         os.system('clear')
 
-real_spin_statistics = {"speed_samples": [], "accel_time_samples": [], "decel_time_samples": []}
+real_spin_statistics = {"speed_samples": []}
 error_window_size = 5
 
-# ------- Функции для байесовской модели (SMC) -------
 num_particles = 100
 bayes_particles = []
 bayes_weights = []
 
-# Инициализация частиц и весов
 for params in physics_params_list:
     particles = []
     weights = np.ones(num_particles) / num_particles
@@ -237,15 +214,11 @@ for params in physics_params_list:
     bayes_weights.append(weights)
 
 def smc_update(model_idx, prev_result, actual_idx):
-    """
-    При новом спине: обновляем байесовские частицы и веса для модели model_idx.
-    """
     particles = bayes_particles[model_idx]
     weights = bayes_weights[model_idx]
-    tau = 1.0  # ширина вероятностного ядра
+    tau = 1.0
     new_weights = np.zeros_like(weights)
 
-    # Вычисляем новые веса с учётом правдоподобия
     for i, particle in enumerate(particles):
         temp_params = physics_params_list[model_idx].copy()
         temp_params["AVERAGE_SPEED"] = particle["AVERAGE_SPEED"]
@@ -261,7 +234,6 @@ def smc_update(model_idx, prev_result, actual_idx):
     else:
         weights[:] = new_weights / total
 
-    # Систематический ресемплинг
     cumulative = np.cumsum(weights)
     new_particles = []
     u0 = random.random() / num_particles
@@ -275,7 +247,6 @@ def smc_update(model_idx, prev_result, actual_idx):
     bayes_particles[model_idx] = new_particles
     bayes_weights[model_idx] = np.ones(num_particles) / num_particles
 
-    # Обновляем физические параметры моделью как средние по частицам
     physics_params_list[model_idx]["AVERAGE_SPEED"] = np.mean([p["AVERAGE_SPEED"] for p in new_particles])
     physics_params_list[model_idx]["FRICTION"]      = np.mean([p["FRICTION"] for p in new_particles])
     logging.info(
@@ -283,8 +254,6 @@ def smc_update(model_idx, prev_result, actual_idx):
         f"AVERAGE_SPEED={physics_params_list[model_idx]['AVERAGE_SPEED']:.4f}, "
         f"FRICTION={physics_params_list[model_idx]['FRICTION']:.4f}"
     )
-
-# --------------------------
 
 def cross_validate_models(data, k=5):
     if len(data) < k:
@@ -295,10 +264,10 @@ def cross_validate_models(data, k=5):
         test_data  = data[i*fold_size:(i+1)*fold_size]
         train_data = data[:i*fold_size] + data[(i+1)*fold_size:]
         for model_name in model_errors_distance.keys():
-            dist_list = [dist for (md_n, dist, ts) in train_data if md_n == model_name]
+            dist_list = [dist for (md_n, dist, ts) in test_data if md_n == model_name]
             if dist_list:
-                avg_train_dist = np.mean(dist_list)
-                results[model_name].append(avg_train_dist)
+                avg_test_dist = np.mean(dist_list)
+                results[model_name].append(avg_test_dist)
     final_scores = {mn: np.mean(vals) for mn, vals in results.items()}
     return final_scores
 
@@ -373,15 +342,9 @@ def retune_physics_params():
             )
 
 def get_random_factor(model_name):
-    # Используем узкий диапазон [0.95, 1.05]
     return np.random.uniform(0.95, 1.05)
 
-# ---------- экспоненциальное трение + три фазы ----------
-
 def calculate_sector_given_v0(model_type, previous_result, v0):
-    """
-    Helper: вычисляет новый сектор по заданной начальной скорости v0.
-    """
     if 'sector_index' not in previous_result or 'direction' not in previous_result:
         return random.randint(0, NUMBER_OF_SECTORS - 1)
 
@@ -390,20 +353,14 @@ def calculate_sector_given_v0(model_type, previous_result, v0):
     params = physics_params_list[model_type - 1]
     friction = params["FRICTION"]
 
-    # Фазы времени:
     t_a = np.random.uniform(params["ACCELERATION_TIME_MIN"], params["ACCELERATION_TIME_MAX"])
     t_uniform = np.random.uniform(10, 17)
     t_total = np.random.uniform(params["TOTAL_DURATION_MIN"], params["TOTAL_DURATION_MAX"])
     t_uniform = min(t_uniform, t_total - t_a)
     t_d = t_total - t_a - t_uniform
 
-    # Фаза 1: разгон (линейный)
     distance_a = 0.5 * v0 * t_a
-
-    # Фаза 2: равномерная
     distance_b = v0 * t_uniform
-
-    # Фаза 3: экспоненциальное затухание
     distance_c = 0.0
     if t_d > 0:
         if friction > 1e-9:
@@ -423,10 +380,6 @@ def calculate_sector_given_v0(model_type, previous_result, v0):
     return int(round(new_idx)) % NUMBER_OF_SECTORS
 
 def calculate_new_sector_physics_improved(model_type, previous_result):
-    """
-    Используем antithetic sampling внутри adaptive_monte_carlo,
-    поэтому здесь оставляем v0 случайным.
-    """
     v0 = np.random.uniform(
         physics_params_list[model_type - 1]["INITIAL_SPEED_MIN"],
         physics_params_list[model_type - 1]["INITIAL_SPEED_MAX"]
@@ -434,18 +387,13 @@ def calculate_new_sector_physics_improved(model_type, previous_result):
     return calculate_sector_given_v0(model_type, previous_result, v0)
 
 def adaptive_monte_carlo(model_type, predicted_result, max_samples=50000, min_batch=5000, epsilon=0.005, alpha=0.95, z=1.96):
-    """
-    Антитетические выборки + адаптивный выбор числа прогонов по формуле N = (z * sigma / epsilon)^2.
-    Добавлен критерий сходимости через L2-норму для сравнения распределений.
-    """
     sector_counts = np.zeros(NUMBER_OF_SECTORS, dtype=int)
     total_samples = 0
     params = physics_params_list[model_type - 1]
     mu0 = (params["INITIAL_SPEED_MIN"] + params["INITIAL_SPEED_MAX"]) / 2.0
-    prev_probs = None  # Хранит предыдущее распределение вероятностей
+    prev_probs = None
 
     while total_samples < max_samples:
-        # Генерируем половину батча с antithetic
         half = min_batch // 2
         for _ in range(half):
             u = np.random.uniform()
@@ -457,24 +405,21 @@ def adaptive_monte_carlo(model_type, predicted_result, max_samples=50000, min_ba
             sector_counts[s2] += 1
         total_samples += 2 * half
 
-        # Если min_batch нечётно, добавляем ещё одну точку
         if min_batch % 2 == 1:
             extra = calculate_new_sector_physics_improved(model_type, predicted_result)
             sector_counts[extra] += 1
             total_samples += 1
 
-        # Оценка вероятностей
         probs = sector_counts / total_samples
         p_top = np.max(probs)
         sigma_est = math.sqrt(p_top * (1 - p_top))
         required_N = (z * sigma_est / epsilon) ** 2
 
-        # Проверка сходимости через L2-норму
         if prev_probs is not None:
             l2_norm = np.sum((probs - prev_probs) ** 2)
             if l2_norm < epsilon ** 2:
-                break  # Распределение стабилизировалось
-        prev_probs = probs.copy()  # Сохраняем текущее распределение для следующей итерации
+                break
+        prev_probs = probs.copy()
 
         if total_samples >= required_N:
             break
@@ -482,8 +427,6 @@ def adaptive_monte_carlo(model_type, predicted_result, max_samples=50000, min_ba
     return sector_counts, total_samples
 
 def predict_next_sector_physics_improved(model_type, previous_results):
-    global model_call_count
-    model_call_count += 1
     if not previous_results:
         return None, None
     last = previous_results[-1]
@@ -523,8 +466,6 @@ def ranked_voting_scoring(predictions, total_sectors):
     return most_probable, highest
 
 def predict_next_sector_ranked_voting(previous_results):
-    global model_call_count
-    model_call_count += 1
     predictions = []
     individual_predictions = {}
     for m in range(1, 11):
@@ -585,9 +526,9 @@ def get_user_input(prompt="Введите результат: "):
         print(f"\nОшибка ввода: {e}")
         return None
 
-def analyze_errors(predictions, actual_results, prediction_info, previous_results, dummy_weights):
+def analyze_errors(predictions, actual_results, prediction_info, previous_results):
     if not prediction_info or not previous_results:
-        return dummy_weights
+        return
     real_idx = previous_results[-1]['sector_index']
     pred_idx = sector_label_to_index.get(prediction_info['sector_label'], -1)
     dist = circular_distance(pred_idx, real_idx, NUMBER_OF_SECTORS)
@@ -596,7 +537,6 @@ def analyze_errors(predictions, actual_results, prediction_info, previous_result
     for m in methods:
         model_errors[m].append(error_flag)
         model_errors_distance[m].append((dist, datetime.datetime.now()))
-    return dummy_weights
 
 @njit
 def loss_function(predicted_index, actual_index, total_sectors):
@@ -639,9 +579,6 @@ def compute_gradient(param_ref, param_key, delta,
     return (loss_up - loss_down) / (2 * delta)
 
 def calibrate_params_batch(previous_results, actual_results, batch_size=10):
-    """
-    Калибровка параметров через мини-батчи (Adam).
-    """
     if len(previous_results) < batch_size or len(actual_results) < batch_size:
         return
 
@@ -651,7 +588,7 @@ def calibrate_params_batch(previous_results, actual_results, batch_size=10):
     for model_idx, params in enumerate(physics_params_list):
         grad_sum = {"AVERAGE_SPEED": 0.0, "SPEED_STD": 0.0}
         for prev, act in zip(batch_prev, batch_act):
-            actual_label = act[1]  # второй элемент кортежа — метка сектора
+            actual_label = act[1]
             actual_idx = sector_label_to_index.get(actual_label, -1)
             grad_speed = compute_gradient(params, 'AVERAGE_SPEED', 0.01, prev, actual_idx, NUMBER_OF_SECTORS)
             grad_std   = compute_gradient(params, 'SPEED_STD', 0.01, prev, actual_idx, NUMBER_OF_SECTORS)
@@ -822,14 +759,12 @@ def main():
         if 'AVERAGE_SPEED' in parsed_new:
             real_spin_statistics["speed_samples"].append(parsed_new['AVERAGE_SPEED'])
 
-        # 5. Обновление байесовской модели (SMC) для каждого нового спина
         if len(previous_results) >= 2:
             prev_res = previous_results[-2]
             actual_idx = parsed_new['sector_index']
             for mi in range(len(physics_params_list)):
                 smc_update(mi, prev_res, actual_idx)
 
-        # 4. Калибровка параметров по данным (mini-batch Adam)
         calibrate_params_batch(previous_results, actual_results, batch_size=10)
 
         retune_physics_params()
@@ -852,7 +787,7 @@ def main():
             logging.info(f"Текущая точность прогнозов: {curr_acc:.2f}%")
 
             predictions_full_info.append((prediction_info, confidence))
-            analyze_errors(predictions, actual_results, prediction_info, previous_results, [0.1]*10)
+            analyze_errors(predictions, actual_results, prediction_info, previous_results)
             log_model_error_frequencies()
 
             if len(previous_results) >= 2:
